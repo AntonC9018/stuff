@@ -7,6 +7,7 @@ public sealed class Model
     public IEnumerable<int> Ids { get; set; }
 }
 
+[ApiController]
 [Route("test")]
 public sealed class AController : Controller
 {
