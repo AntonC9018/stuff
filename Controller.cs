@@ -16,14 +16,17 @@ public sealed class AController : Controller
     }
 
     [HttpGet("model")]
-    public IActionResult GetWithModel(Model model) => Ok(model);
+    public ActionResult<Model> GetWithModel(Model model) => Ok(model);
 
     [HttpGet("model-query")]
-    public IActionResult GetWithModelFromQuery([FromQuery] Model model) => Ok(model);
+    public ActionResult<Model> GetWithModelFromQuery([FromQuery] Model model) => Ok(model);
     
     [HttpGet("model-flat")]
-    public IActionResult GetWithModelFromQueryFlat([FromQuery(Name = "")] Model model) => Ok(model);
+    public ActionResult<Model> GetWithModelFromQueryFlat([FromQuery(Name = "")] Model model) => Ok(model);
 
     [HttpGet("no-model")]
-    public IActionResult GetWithoutModel(IEnumerable<int> model) => Ok(model);
+    public ActionResult<IEnumerable<int>> GetWithoutModel(IEnumerable<int> model) => Ok(model);
+    
+    [HttpGet("no-model-query")]
+    public ActionResult<IEnumerable<int>> GetWithoutModelFromQuery([FromQuery] IEnumerable<int> model) => Ok(model);
 }
