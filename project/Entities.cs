@@ -150,7 +150,7 @@ public static class Helper
                     var entityType = entityTypesForInterface.Current;
                     args[0] = entityType.Metadata;
                     args[1] = i.Delegate;
-                    _ConfigureEntityMethod.MakeGenericMethod(i.Interface, entityType.Metadata.ClrType)
+                    _ConfigureEntityMethod.MakeGenericMethod(i.Interface)
                         .Invoke(null, args);
                 }
                 while (entityTypesForInterface.MoveNext());
@@ -226,12 +226,11 @@ public static class Helper
         .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
         .Single(x => x.Name == nameof(ConfigureEntity));
 
-    private static void ConfigureEntity<TInterface, TEntity>(
+    private static void ConfigureEntity<TInterface>(
         IMutableEntityType entityType,
         Action<EntityTypeBuilder<TInterface>> interfaceConfiguration)
     
         where TInterface : class
-        where TEntity : class, TInterface
     {
 #pragma warning disable EF1001 // internal API usage
         var builder = new EntityTypeBuilder<TInterface>(entityType);
@@ -252,13 +251,12 @@ public sealed class ApplicationDbContext : DbContext
         modelBuilder.SplitTable(tableName: "Test", table =>
         {
             table.MainEntity<TaskAll>();
-            table.Entity<TaskRequired>();
+            // table.Entity<TaskRequired>();
             table.Entity<TaskGeneral>();
 
             table.Partial<ITaskRequired>(entity =>
             {
                 entity.Property(x => x.Name).HasMaxLength(100);
-                entity.HasIndex(x => x.Name).IsUnique();
             });
             table.Partial<ITaskGeneral>(entity =>
             {
@@ -270,11 +268,6 @@ public sealed class ApplicationDbContext : DbContext
             });
         });
         modelBuilder.SetColumnNamesByConventionIfNotSet(s => s);
-
-        foreach (var entity in modelBuilder.Model.GetEntityTypes())
-        {
-            var foreignKeys = entity.GetForeignKeys();
-        }
     }
 }
 

@@ -47,32 +47,38 @@ using (var scope = app.Services.CreateScope())
 
 app.MapGet("endpoint", async (IDbContextFactory<ApplicationDbContext> factory) =>
 {
-    using var dbContext = factory.CreateDbContext();
-    var company = new Company { };
-    dbContext.Set<Company>().Add(company);
-    await dbContext.SaveChangesAsync();
-    
-    var taskAll = new TaskAll
+    TaskAll taskAll;
     {
-        Company = company,
-        Name = "Test",
-        SomeOtherProperty = "ABC",
-        Description = "NoDescription",
-    };
-    dbContext.Set<TaskAll>().Add(taskAll);
-    await dbContext.SaveChangesAsync();
-    
-    var taskGeneral = dbContext.Set<TaskGeneral>().First(t => t.Id == taskAll.Id);
-    taskGeneral.Description = "Description";
-    await dbContext.SaveChangesAsync();
+        using var dbContext = factory.CreateDbContext();
+        var company = new Company { };
+        dbContext.Set<Company>().Add(company);
+        await dbContext.SaveChangesAsync();
+        
+        taskAll = new TaskAll
+        {
+            Company = company,
+            Name = "Test",
+            SomeOtherProperty = "ABC",
+            Description = "NoDescription",
+        };
+        dbContext.Set<TaskAll>().Add(taskAll);
+        await dbContext.SaveChangesAsync();
+    }
+    {
+        using var dbContext = factory.CreateDbContext();
+        
+        var taskGeneral = dbContext.Set<TaskGeneral>().First(t => t.Id == taskAll.Id);
+        taskGeneral.Description = "Description";
+        await dbContext.SaveChangesAsync();
 
-    var newTaskAll = dbContext.Set<TaskAll>().AsNoTracking().First(t => t.Id == taskAll.Id);
-    return new
-    {
-        taskAll, 
-        newTaskAll,
-        taskGeneral,
-    };
+        var newTaskAll = dbContext.Set<TaskAll>().AsNoTracking().First(t => t.Id == taskAll.Id);
+        return Results.Json(new
+        {
+            taskAll, 
+            newTaskAll,
+            taskGeneral,
+        });
+    }
 });
 
 app.Run();
