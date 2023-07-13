@@ -1,0 +1,3 @@
+[submodule "submodules/Flowqe.SourceGenerators"]
+	path = submodules/Flowqe.SourceGenerators
+	url = https://dev.azure.com/flowqe-inc/Flowqe.Public/_git/Flowqe.SourceGenerators
