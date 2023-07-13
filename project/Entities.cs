@@ -12,7 +12,6 @@ using Type = System.Type;
 public sealed class Company
 {
     public int Id { get; set; }
-    public ICollection<TaskAll> Tasks { get; set; }
 }
 
 public interface ITaskBase
@@ -131,6 +130,7 @@ public static class Helper
         
         var entityTypesByInterface = interfaceConfigurations
             .SelectMany(i => entityBuilders
+                .Append(mainEntityBuilder)
                 .Where(e => i.Interface.IsAssignableFrom(e.Metadata.ClrType))
                 .Select(e => (i.Interface, EntityType: e)))
             .ToLookup(x => x.Interface, x => x.EntityType);
@@ -192,6 +192,7 @@ public static class Helper
             if (mainEntityNavigation is null)
                 throw new Exception("Main entity navigation is required");
 
+            var entityType = entityBuilder.Metadata.ClrType;
             var mainEntityNavigationName = mainEntityNavigation.Name;
 
             for (int j = 0; j < i; j++)
@@ -200,18 +201,20 @@ public static class Helper
                 entityBuilder
                     .HasOne(otherType)
                     .WithOne()
-                    .HasForeignKey(otherType, idPropertyNames);
+                    .HasForeignKey(entityType, idPropertyNames)
+                    .IsRequired();
             }
 
             entityBuilder
                 .HasOne(mainEntityModel.ClrType, mainEntityNavigationName)
                 .WithOne()
-                .HasForeignKey(mainEntityModel.ClrType, idPropertyNames);
+                .HasForeignKey(entityType, idPropertyNames)
+                .IsRequired();
             entityBuilder
                 .HasKey(idPropertyNames);
-            // entityBuilder
-            //     .Navigation(mainEntityNavigationName)
-            //     .IsRequired();
+            entityBuilder
+                .Navigation(mainEntityNavigationName)
+                .IsRequired();
             entityBuilder
                 .ToTable(tableName);
         }
@@ -267,6 +270,11 @@ public sealed class ApplicationDbContext : DbContext
             });
         });
         modelBuilder.SetColumnNamesByConventionIfNotSet(s => s);
+
+        foreach (var entity in modelBuilder.Model.GetEntityTypes())
+        {
+            var foreignKeys = entity.GetForeignKeys();
+        }
     }
 }
 
