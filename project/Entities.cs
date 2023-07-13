@@ -1,9 +1,10 @@
 ﻿using System.Reflection;
 using AutoImplementedProperties.Attributes;
+using Conventions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using Microsoft.EntityFrameworkCore.Metadata.Internal;
+using InvalidOperationException = System.InvalidOperationException;
 using Type = System.Type;
 
 #pragma warning disable CS8618
@@ -11,7 +12,7 @@ using Type = System.Type;
 public sealed class Company
 {
     public int Id { get; set; }
-    public ICollection<Task> Tasks { get; set; }
+    public ICollection<TaskAll> Tasks { get; set; }
 }
 
 public interface ITaskBase
@@ -53,234 +54,186 @@ public sealed partial class TaskAll : ITaskRequired, ITaskGeneral
 public sealed class TableSplitEntityBuilder
 {
     private readonly ModelBuilder _modelBuilder;
-    public readonly List<Type> EntityTypes = new();
-    public readonly List<(Type Interface, Delegate? Delegate)> InterfaceConfigurations = new();
+    private readonly List<EntityTypeBuilder> _entityBuilders = new();
+    private readonly List<(Type Interface, Delegate? Delegate)> _sharedPartialConfigurations = new();
+    private EntityTypeBuilder? _mainEntityType;
+    
+    internal IReadOnlyList<EntityTypeBuilder> EntityBuilders 
+        => _entityBuilders;
+    internal IReadOnlyList<(Type Interface, Delegate? Delegate)> SharedPartialConfigurations 
+        => _sharedPartialConfigurations;
+    internal EntityTypeBuilder? MainEntityType 
+        => _mainEntityType;
 
     public TableSplitEntityBuilder(ModelBuilder modelBuilder)
     {
         _modelBuilder = modelBuilder;
     }
+    
+    public TableSplitEntityBuilder MainEntity<T>(Action<EntityTypeBuilder<T>>? configure = null)
+        where T : class
+    {
+        if (_mainEntityType is not null)
+            throw new InvalidOperationException("Main entity already configured.");
+        
+        var builder = _modelBuilder.Entity<T>();
+        _mainEntityType = builder;
+        configure?.Invoke(builder);
+        
+        return this;
+    }
 
     public TableSplitEntityBuilder Entity<T>(Action<EntityTypeBuilder<T>>? configure = null)
         where T : class
     {
-        configure?.Invoke(_modelBuilder.Entity<T>());
-        EntityTypes.Add(typeof(T));
+        var builder = _modelBuilder.Entity<T>();
+        configure?.Invoke(builder);
+
+        if (EntityBuilders.All(x => x.Metadata.ClrType != typeof(T))
+            && _mainEntityType?.Metadata.ClrType != typeof(T))
+        {
+            _entityBuilders.Add(builder);
+        }
+        
         return this;
     }
     
-    public TableSplitEntityBuilder Interface<T>(Action<EntityTypeBuilder<T>>? configure = null)
+    public TableSplitEntityBuilder Partial<T>(Action<EntityTypeBuilder<T>>? configure = null)
         where T : class
     {
         if (typeof(T).IsInterface == false)
             throw new InvalidOperationException("Type must be an interface.");
         
-        InterfaceConfigurations.Add((typeof(T), configure));
+        _sharedPartialConfigurations.Add((typeof(T), configure));
         return this;
     }
 }
 
 public static class Helper
 {
-    public static ModelBuilder SplitTable<TMainEntity>(
+    public static ModelBuilder SplitTable(
         this ModelBuilder modelBuilder,
-        Action<EntityTypeBuilder<TMainEntity>, TableSplitEntityBuilder> configure)
-
-        where TMainEntity : class
+        string tableName,
+        Action<TableSplitEntityBuilder> configure)
     {
-        var tableBuilder = new TableSplitEntityBuilder();
-        var mainEntityModelBuilder = modelBuilder.Entity<TMainEntity>();
-        configure(mainEntityModelBuilder, tableBuilder);
+        var tableBuilder = new TableSplitEntityBuilder(modelBuilder);
+        configure(tableBuilder);
+        
+        var mainEntityBuilder = tableBuilder.MainEntityType;
+        if (mainEntityBuilder is null)
+            throw new InvalidOperationException("Configure main entity with MainEntity<T> method.");
+        var mainEntityModel = mainEntityBuilder.Metadata;
 
-        Dictionary<string, List<Type>> propertiesToContainingEntities = new();
-        Dictionary<Type, List<PropertyInfo>> interfaceToPropertyMap = new();
-        HashSet<Type> allInterfaces = new();
-        List<List<Type>> entityToInterfaces = new();
-        foreach (var entityType in tableBuilder.EntityTypes)
+        mainEntityBuilder.ToTable(tableName);
+        
+        var entityBuilders = tableBuilder.EntityBuilders;
+        var interfaceConfigurations = tableBuilder.SharedPartialConfigurations;
+        
+        var entityTypesByInterface = interfaceConfigurations
+            .SelectMany(i => entityBuilders
+                .Where(e => i.Interface.IsAssignableFrom(e.Metadata.ClrType))
+                .Select(e => (i.Interface, EntityType: e)))
+            .ToLookup(x => x.Interface, x => x.EntityType);
+
+        if (tableBuilder.SharedPartialConfigurations.Count > 0)
         {
-            var interfaces = entityType.GetInterfaces();
-            var interfacesList = new List<Type>();
+            var args = new object?[2];
 
-            foreach (var i in interfaces)
+            foreach (var i in tableBuilder.SharedPartialConfigurations)
             {
-                if (interfaceToPropertyMap.ContainsKey(i))
-                    continue;
-
-                var properties = i
-                    .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                    .Where(p => p is { CanWrite: true, CanRead: true })
-                    .ToList();
-
-                if (properties.Count == 0)
-                    continue;
-
-                interfaceToPropertyMap.Add(i, properties);
-
-                foreach (var property in properties)
+                using var entityTypesForInterface = entityTypesByInterface[i.Interface].GetEnumerator();
+                if (!entityTypesForInterface.MoveNext())
+                    throw new InvalidOperationException($"No entity types found for interface {i.Interface}.");
+                
+                do
                 {
-                    if (!propertiesToContainingEntities.TryGetValue(property.Name, out var entities))
-                    {
-                        entities = new List<Type>();
-                        propertiesToContainingEntities.Add(property.Name, entities);
-                    }
-
-                    entities.Add(entityType);
+                    var entityType = entityTypesForInterface.Current;
+                    args[0] = entityType.Metadata;
+                    args[1] = i.Delegate;
+                    _ConfigureEntityMethod.MakeGenericMethod(i.Interface, entityType.Metadata.ClrType)
+                        .Invoke(null, args);
                 }
+                while (entityTypesForInterface.MoveNext());
             }
-
-            allInterfaces.UnionWith(interfaces);
-            entityToInterfaces.Add(interfacesList);
         }
 
-        var mainEntityInterfaces = typeof(TMainEntity)
-            .GetInterfaces()
-            .ToHashSet();
-
-        var missingInterfacesInMainEntity = allInterfaces
-            .Where(x => !mainEntityInterfaces.Contains(x))
-            .ToList();
-
-        if (missingInterfacesInMainEntity.Any())
+        var idProperties = mainEntityModel
+            .GetKeys()
+            .Where(k => k.IsPrimaryKey())
+            .Select(k => k.Properties)
+            .First();
+        var idPropertyNames = idProperties
+            .Select(x => x.Name)
+            .ToArray();
+        
+        // Make sure these properties are in all entities
+        foreach (var entityBuilder in entityBuilders)
         {
-            throw new Exception("Missing interfaces in main entity: "
-                                + string.Join(", ", missingInterfacesInMainEntity.Select(x => x.Name)));
+            var entityModel = entityBuilder.Metadata;
+            var entityProperties = entityModel.GetProperties();
+            var missingProperties = idPropertyNames
+                .Where(x => entityProperties.All(p => p.Name != x))
+                .ToArray();
+            foreach (var missingProperty in missingProperties)
+            {
+                var property = mainEntityModel.FindProperty(missingProperty)!;
+                if (entityModel.FindProperty(property.Name) is null)
+                    entityModel.AddProperty(property.Name, property.ClrType);
+            }
         }
 
-        var mainEntityModel = mainEntityModelBuilder.Metadata;
-        var mainEntityPrimaryKey = mainEntityModel.FindPrimaryKey();
-        if (mainEntityPrimaryKey is null)
-            throw new Exception("Main entity primary key is null");
-        var mainEntityPrimaryKeyPropertyNames = mainEntityPrimaryKey.Properties.Select(p => p.Name).ToArray();
-
-        var entityTypes = tableBuilder.EntityTypes;
-        for (int i = 0; i < entityTypes.Count; i++)
+        for (int i = 0; i < entityBuilders.Count; i++)
         {
-            var mainEntityNavigation = entityTypes[i]
-                .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                .FirstOrDefault(x => x.PropertyType == typeof(TMainEntity));
+            var entityBuilder = entityBuilders[i];
+            var mainEntityNavigation = entityBuilders[i]
+                .Metadata
+                .GetDeclaredNavigations()
+                .FirstOrDefault(x => x.ClrType == mainEntityModel.ClrType);
             if (mainEntityNavigation is null)
                 throw new Exception("Main entity navigation is required");
 
             var mainEntityNavigationName = mainEntityNavigation.Name;
 
-            var entityBuilder = modelBuilder.Entity(entityTypes[i]);
-            var entityModel = entityBuilder.Metadata;
-
             for (int j = 0; j < i; j++)
             {
+                var otherType = entityBuilders[j].Metadata.ClrType;
                 entityBuilder
-                    .HasOne(entityTypes[j])
+                    .HasOne(otherType)
                     .WithOne()
-                    .HasForeignKey(entityTypes[j], mainEntityPrimaryKeyPropertyNames);
+                    .HasForeignKey(otherType, idPropertyNames);
             }
 
             entityBuilder
-                .HasOne(typeof(TMainEntity), mainEntityNavigationName)
+                .HasOne(mainEntityModel.ClrType, mainEntityNavigationName)
                 .WithOne()
-                .HasForeignKey(entityTypes[i], mainEntityPrimaryKeyPropertyNames);
+                .HasForeignKey(mainEntityModel.ClrType, idPropertyNames);
             entityBuilder
-                .Navigation(mainEntityNavigationName)
-                .IsRequired();
-
-            foreach (var @interface in entityToInterfaces[i])
-            {
-                var properties = interfaceToPropertyMap[@interface];
-                foreach (var property in properties)
-                {
-                    var mainEntityProperty = mainEntityModel.GetProperty(property.Name);
-                    var propertyModel = entityModel.GetProperty(property.Name);
-                    propertyModel.IsNullable = mainEntityProperty.IsNullable;
-                    propertyModel.ValueGenerated = mainEntityProperty.ValueGenerated;
-                    propertyModel.IsConcurrencyToken = mainEntityProperty.IsConcurrencyToken;
-                    propertyModel.SetColumnName(mainEntityProperty.GetColumnName());
-                    propertyModel.SetColumnType(mainEntityProperty.GetColumnType());
-                    propertyModel.SetMaxLength(mainEntityProperty.GetMaxLength());
-                    propertyModel.SetPrecision(mainEntityProperty.GetPrecision());
-                    propertyModel.SetScale(mainEntityProperty.GetScale());
-                    propertyModel.SetIsUnicode(mainEntityProperty.IsUnicode());
-                    propertyModel.SetDefaultValueSql(mainEntityProperty.GetDefaultValueSql());
-                    propertyModel.SetComputedColumnSql(mainEntityProperty.GetComputedColumnSql());
-                    propertyModel.SetDefaultValue(mainEntityProperty.GetDefaultValue());
-                    propertyModel.SetValueConverter(mainEntityProperty.GetValueConverter());
-                    propertyModel.SetValueComparer(mainEntityProperty.GetValueComparer());
-                    propertyModel.SetValueGeneratorFactory(mainEntityProperty.GetValueGeneratorFactory());
-                    propertyModel.SetBeforeSaveBehavior(mainEntityProperty.GetBeforeSaveBehavior());
-                    propertyModel.SetAfterSaveBehavior(mainEntityProperty.GetAfterSaveBehavior());
-                    propertyModel.SetProviderClrType(mainEntityProperty.GetProviderClrType());
-                    foreach (var annotation in mainEntityProperty.GetAnnotations())
-                        propertyModel.AddAnnotation(annotation.Name, annotation.Value);
-                }
-            }
-        }
-
-        var entitiesToProcess = new HashSet<Type>();
-
-        void CacheEntities(IReadOnlyList<IMutableProperty> properties)
-        {
-            using var e = properties.GetEnumerator();
-            if (!e.MoveNext())
-                return;
-            foreach (var entity in propertiesToContainingEntities[e.Current.Name])
-                entitiesToProcess.Add(entity);
-            while (e.MoveNext())
-                entitiesToProcess.IntersectWith(propertiesToContainingEntities[e.Current.Name]);
-        }
-
-        foreach (var index in mainEntityModel.GetIndexes())
-        {
-            var properties = index.Properties.Select(p => p.Name).ToArray();
-            CacheEntities(index.Properties);
-
-            foreach (var entity in entitiesToProcess)
-            {
-                var entityBuilder = modelBuilder.Entity(entity);
-                var indexBuilder = entityBuilder.HasIndex(properties);
-                indexBuilder.HasDatabaseName(index.GetDatabaseName());
-                indexBuilder.HasFilter(index.GetFilter());
-                indexBuilder.IsUnique(index.IsUnique);
-                // indexBuilder.HasAnnotation("SqlServer:Include", index.GetIncludeProperties());
-            }
-
-            entitiesToProcess.Clear();
-        }
-
-        // Do the same thing with foreign keys
-        foreach (var foreignKey in mainEntityModel.GetForeignKeys())
-        {
-            var properties = foreignKey.Properties.Select(p => p.Name).ToArray();
-            CacheEntities(foreignKey.Properties);
-
-            foreach (var entity in entitiesToProcess)
-            {
-                var entityBuilder = modelBuilder.Entity(entity);
-                var entityModel = entityBuilder.Metadata;
-
-                var newForeignKey = entityModel.AddForeignKey(
-                    properties.Select(p => entityModel.GetProperty(p)).ToArray(),
-                    foreignKey.PrincipalKey,
-                    foreignKey.PrincipalEntityType);
-                // Copy configuration
-                newForeignKey.DeleteBehavior = foreignKey.DeleteBehavior;
-                newForeignKey.IsRequired = foreignKey.IsRequired;
-                newForeignKey.IsUnique = foreignKey.IsUnique;
-                newForeignKey.IsOwnership = foreignKey.IsOwnership;
-                newForeignKey.IsRequiredDependent = foreignKey.IsRequiredDependent;
-            }
-
-            entitiesToProcess.Clear();
-        }
-
-        // Do the same thing with navigations
-        foreach (var navigation in mainEntityModel.GetNavigations())
-        {
-            foreach (var entity in propertiesToContainingEntities[navigation.Name])
-            {
-                var entityBuilder = modelBuilder.Entity(entity);
-                entityBuilder.Navigation(navigation.Name);
-            }
+                .HasKey(idPropertyNames);
+            // entityBuilder
+            //     .Navigation(mainEntityNavigationName)
+            //     .IsRequired();
+            entityBuilder
+                .ToTable(tableName);
         }
 
         return modelBuilder;
+    }
+    
+    private static readonly MethodInfo _ConfigureEntityMethod = typeof(Helper)
+        .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+        .Single(x => x.Name == nameof(ConfigureEntity));
+
+    private static void ConfigureEntity<TInterface, TEntity>(
+        IMutableEntityType entityType,
+        Action<EntityTypeBuilder<TInterface>> interfaceConfiguration)
+    
+        where TInterface : class
+        where TEntity : class, TInterface
+    {
+#pragma warning disable EF1001 // internal API usage
+        var builder = new EntityTypeBuilder<TInterface>(entityType);
+#pragma warning restore EF1001
+        interfaceConfiguration(builder);
     }
 }
 
@@ -293,17 +246,27 @@ public sealed class ApplicationDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.SplitTable<TaskAll>((entity, table) =>
+        modelBuilder.SplitTable(tableName: "Test", table =>
         {
-            table.AddEntity<TaskRequired>();
-            table.AddEntity<TaskGeneral>();
-            
-            entity.Property(x => x.Id).ValueGeneratedOnAdd();
-            entity.Property(x => x.Name).HasMaxLength(100);
-            entity.Property(x => x.Description).HasMaxLength(1000);
-            entity.HasIndex(x => x.Name).IsUnique();
-            entity.HasOne(x => x.Company).WithMany().OnDelete(DeleteBehavior.Cascade);
+            table.MainEntity<TaskAll>();
+            table.Entity<TaskRequired>();
+            table.Entity<TaskGeneral>();
+
+            table.Partial<ITaskRequired>(entity =>
+            {
+                entity.Property(x => x.Name).HasMaxLength(100);
+                entity.HasIndex(x => x.Name).IsUnique();
+            });
+            table.Partial<ITaskGeneral>(entity =>
+            {
+                entity.Property(x => x.Description).HasMaxLength(1000);
+            });
+            table.Partial<ITaskBase>(entity =>
+            {
+                entity.HasOne(x => x.Company).WithMany().OnDelete(DeleteBehavior.Cascade);
+            });
         });
+        modelBuilder.SetColumnNamesByConventionIfNotSet(s => s);
     }
 }
 
