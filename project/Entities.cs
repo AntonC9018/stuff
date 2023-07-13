@@ -201,15 +201,13 @@ public static class Helper
                 entityBuilder
                     .HasOne(otherType)
                     .WithOne()
-                    .HasForeignKey(entityType, idPropertyNames)
-                    .IsRequired();
+                    .HasForeignKey(entityType, idPropertyNames);
             }
 
             entityBuilder
                 .HasOne(mainEntityModel.ClrType, mainEntityNavigationName)
                 .WithOne()
-                .HasForeignKey(entityType, idPropertyNames)
-                .IsRequired();
+                .HasForeignKey(entityType, idPropertyNames);
             entityBuilder
                 .HasKey(idPropertyNames);
             entityBuilder
